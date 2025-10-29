@@ -338,7 +338,7 @@ app.post('/postback/registered', auth, async (req, res) => {
   const { uid } = req.body || {};
   const id = Number(uid);
   const u = users.get(id);
-  if (!u) return res.json({ ok: true, msg: 'user not found (ok)' });
+  if (!u) return res.json({ ok: true, msg: 'user not found (ok) });
   setStatus(id, 'registered');
   clearTimers(u);
   const lang = u.lang || 'en';
@@ -353,7 +353,7 @@ app.post('/postback/deposited', auth, async (req, res) => {
   const { uid } = req.body || {};
   const id = Number(uid);
   const u = users.get(id);
-  if (!u) return res.json({ ok: true, msg: 'user not found (ok)' });
+  if (!u) return res.json({ ok: true, msg: 'user not found (ok) });
   setStatus(id, 'deposited');
   clearTimers(u);
   const lang = u.lang || 'en';
@@ -361,27 +361,45 @@ app.post('/postback/deposited', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ====== Launch mode: webhook if WEBHOOK_URL set, else polling ======
+// ====== Launch mode (single mode only) ======
 bot.catch((err) => console.error('Bot error:', err));
 process.on('unhandledRejection', console.error);
 process.on('uncaughtException', console.error);
 
-if (WEBHOOK_URL) {
-  const path = new URL(WEBHOOK_URL).pathname || '/tg';
-  // Set webhook in Telegram
-  bot.telegram.setWebhook(WEBHOOK_URL)
-    .then(() => console.log('Webhook set to', WEBHOOK_URL))
-    .catch((e) => console.error('SetWebhook error:', e));
+async function bootstrap() {
+  try {
+    const info = await bot.telegram.getWebhookInfo();
+    console.log('Current webhook info:', info);
+  } catch {}
 
-  // Bind telegraf webhook handler to Express
-  app.use(path, (req, res) => bot.webhookCallback(path)(req, res));
+  if (WEBHOOK_URL) {
+    // --- WEBHOOK MODE ---
+    const path = new URL(WEBHOOK_URL).pathname || '/tg';
 
-  app.listen(PORT, () => console.log(`HTTP on :${PORT} (webhook mode)`));
-} else {
-  // Fallback polling (easier locally)
-  bot.launch().then(() => console.log('Bot started (polling mode)'));
-  app.listen(PORT, () => console.log(`HTTP on :${PORT}`));
+    // включаем webhook и чистим «хвосты»
+    await bot.telegram.setWebhook(WEBHOOK_URL, { drop_pending_updates: true });
+    console.log('Webhook set to', WEBHOOK_URL);
+
+    // вешаем обработчик до listen
+    app.use(path, bot.webhookCallback(path));
+
+    // стартуем сервер
+    app.listen(PORT, () => console.log(`HTTP on :${PORT} (webhook mode)`));
+
+    // ВАЖНО: НЕ вызывать bot.launch() в webhook-режиме
+  } else {
+    // --- POLLING MODE (локально) ---
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    await bot.launch();
+    console.log('Bot started (polling mode)');
+    app.listen(PORT, () => console.log(`HTTP on :${PORT}`));
+  }
 }
+
+bootstrap().catch((e) => {
+  console.error('Bootstrap error:', e);
+  process.exit(1);
+});
 
 // Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
