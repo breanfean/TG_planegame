@@ -1,4 +1,4 @@
-// TG Gambling Funnel Bot — EN/RU with Tier-1 language choice
+// TG Gambling Funnel Bot — EN/RU with Tier-1 language choice + WEBHOOK mode
 // Node 18+, Telegraf + Express. Replace in-memory storage with DB/Redis for prod.
 
 import 'dotenv/config';
@@ -13,6 +13,7 @@ const {
   AFFILIATE_DEPOSIT_URL,
   POSTBACK_SECRET,
   PORT = 3000,
+  WEBHOOK_URL, // e.g. https://yourapp.onrender.com/tg
 } = process.env;
 if (!BOT_TOKEN) throw new Error('BOT_TOKEN is required');
 
@@ -46,7 +47,7 @@ function schedule(u, fn, ms) {
   u.timers.push(t);
 }
 
-// ====== i18n dictionary (EN + RU full). Add more langs as needed. ======
+// ====== i18n dictionary (EN + RU) ======
 const i18n = {
   en: {
     lang_prompt: 'Choose your language / Wähle deine Sprache / Choisis ta langue / Elige tu idioma / Scegli la tua lingua',
@@ -182,12 +183,10 @@ const SUPPORTED_LANGS = new Set(['en', 'ru']);
 function resolveLang(code) {
   return SUPPORTED_LANGS.has(code) ? code : 'en'; // default EN for Tier-1
 }
-
 function genNick() {
   const animals = ['Falcon', 'Eagle', 'Wolf', 'Tiger', 'Fox', 'Hawk', 'Raven', 'Shark'];
   return `Player_${animals[Math.floor(Math.random()*animals.length)]}_${Math.floor(1000+Math.random()*8999)}`;
 }
-
 function buildRegisterUrl(userId, payload, lang) {
   const p = new URL(AFFILIATE_REGISTER_URL);
   p.searchParams.set('uid', String(userId));
@@ -203,7 +202,7 @@ function buildDepositUrl(userId, payload, lang) {
   return p.toString();
 }
 
-// ====== START flow ======
+// ====== Start flow ======
 bot.start(async (ctx) => {
   const u = getUser(ctx);
   u.payload = ctx.startPayload || '';
@@ -211,10 +210,10 @@ bot.start(async (ctx) => {
   u.age_ok = u.age_ok || false;
   clearTimers(u);
 
-  // 1) Language choice
+  // Language choice
   await ctx.reply(i18n.en.lang_prompt, langKb());
 
-  // If user never picks language within 60s, default EN and continue
+  // Fallback to EN if user ignores language
   schedule(u, async () => {
     if (!u.lang) {
       u.lang = 'en';
@@ -228,22 +227,18 @@ bot.on('callback_query', async (ctx) => {
   const data = ctx.callbackQuery.data;
   const u = getUser(ctx);
 
-  // LANG
   if (data.startsWith('lang:')) {
     const chosen = data.split(':')[1];
     u.lang = resolveLang(chosen);
     await ctx.answerCbQuery();
-    await ctx.editMessageReplyMarkup(); // remove lang kb
+    await ctx.editMessageReplyMarkup();
     return ctx.reply(`${t(u.lang, 'age_title')}\n\n${t(u.lang, 'age_text')}`, ageKb(u.lang));
   }
 
-  // AGE
   if (data === 'age:yes') {
     u.age_ok = true;
     await ctx.answerCbQuery('✔');
     await ctx.editMessageReplyMarkup();
-
-    // Main greeting + menu
     await ctx.reply(t(u.lang || 'en', 'hi', ctx.from?.first_name), mainMenuKb(u.lang || 'en'));
     return;
   }
@@ -253,13 +248,11 @@ bot.on('callback_query', async (ctx) => {
     return ctx.reply(t(u.lang || 'en', 'rules_text'));
   }
 
-  // NAV BACK
   if (data === 'nav:back') {
     await ctx.answerCbQuery();
     return ctx.reply(t(u.lang || 'en', 'hi', ctx.from?.first_name), mainMenuKb(u.lang || 'en'));
   }
 
-  // NICK
   if (data === 'nick:enter') {
     await ctx.answerCbQuery();
     u.awaiting_nick = true;
@@ -269,29 +262,27 @@ bot.on('callback_query', async (ctx) => {
     await ctx.answerCbQuery();
     u.nick = genNick();
     await ctx.reply(t(u.lang || 'en', 'nick_saved', u.nick));
-    // Continue to register link
+
     const regUrl = buildRegisterUrl(ctx.from.id, u.payload, u.lang || 'en');
     await ctx.reply(t(u.lang || 'en', 'reg_link_text'), registerKb(u.lang || 'en', regUrl));
     setStatus(ctx.from.id, 'clicked_register');
 
-    // Schedule follow-ups
     clearTimers(u);
     schedule(u, async () => ctx.reply(t(u.lang || 'en', 'followup_30m')), 30 * 60 * 1000);
     schedule(u, async () => ctx.reply(t(u.lang || 'en', 'followup_24h')), 24 * 60 * 60 * 1000);
     return;
   }
 
-  // Unknown cb
   await ctx.answerCbQuery('OK');
 });
 
 // ====== Text handlers ======
-bot.hears([ (ctx) => !!ctx.message?.text ], async (ctx, next) => {
+bot.hears([(ctx) => !!ctx.message?.text], async (ctx, next) => {
   const u = getUser(ctx);
   const lang = u.lang || 'en';
   const txt = ctx.message.text;
+  const L = i18n[lang];
 
-  // If awaiting nickname
   if (u.awaiting_nick) {
     u.awaiting_nick = false;
     u.nick = txt.trim().slice(0, 32);
@@ -306,69 +297,58 @@ bot.hears([ (ctx) => !!ctx.message?.text ], async (ctx, next) => {
     return;
   }
 
-  // Main menu commands (match by label in current lang)
-  const L = i18n[lang];
   switch (txt) {
     case L.btn_how:
       return ctx.reply(L.how_text, Markup.inlineKeyboard([[Markup.button.callback(L.btn_back, 'nav:back')]]));
-
     case L.btn_claim:
     case L.btn_bonus:
       return ctx.reply(L.ask_nick, nickKb(lang));
-
     case L.btn_deposit: {
       const depUrl = buildDepositUrl(ctx.from.id, u.payload, lang);
       return ctx.reply(L.registered_ok(u.nick), depositKb(lang, depUrl));
     }
-
     case L.btn_payouts:
       return ctx.reply('Top payouts are updated daily. (Stub — integrate your feed here).');
-
     case L.btn_help:
       return ctx.reply(L.help_text, Markup.inlineKeyboard([[Markup.button.callback(L.btn_support, 'support:human')]]));
-
     default:
-      // fallthrough to next middlewares if any
       return next();
   }
 });
 
-// Support button
 bot.action('support:human', async (ctx) => {
   await ctx.answerCbQuery();
   return ctx.reply('Support will contact you soon. (Stub: route to live agent).');
 });
 
-// ====== Express server for postbacks (registered / deposited) ======
+// ====== Express server for postbacks ======
 const app = express();
 app.use(bodyParser.json());
 
+// Basic health
+app.get('/', (req, res) => res.send('OK'));
+
+// Secured postbacks
 function auth(req, res, next) {
   const sig = req.headers['x-postback-secret'];
   if (POSTBACK_SECRET && sig !== POSTBACK_SECRET) return res.status(401).json({ ok: false });
   next();
 }
-
-// POST /postback/registered { uid: "12345" }
 app.post('/postback/registered', auth, async (req, res) => {
   const { uid } = req.body || {};
   const id = Number(uid);
   const u = users.get(id);
   if (!u) return res.json({ ok: true, msg: 'user not found (ok)' });
   setStatus(id, 'registered');
-  clearTimers(u); // reset previous reminders
-
+  clearTimers(u);
   const lang = u.lang || 'en';
   const depUrl = buildDepositUrl(id, u.payload, lang);
   try {
     await bot.telegram.sendMessage(id, t(lang, 'registered_ok', u.nick), depositKb(lang, depUrl));
-    // Reactivation after 48h if no deposit
     schedule(u, async () => bot.telegram.sendMessage(id, t(lang, 'reactivation_7d')), 48 * 60 * 60 * 1000);
-  } catch (e) { /* ignore send errors */ }
+  } catch {}
   res.json({ ok: true });
 });
-
-// POST /postback/deposited { uid: "12345" }
 app.post('/postback/deposited', auth, async (req, res) => {
   const { uid } = req.body || {};
   const id = Number(uid);
@@ -376,20 +356,32 @@ app.post('/postback/deposited', auth, async (req, res) => {
   if (!u) return res.json({ ok: true, msg: 'user not found (ok)' });
   setStatus(id, 'deposited');
   clearTimers(u);
-
   const lang = u.lang || 'en';
-  try {
-    await bot.telegram.sendMessage(id, t(lang, 'deposited_ok'));
-  } catch (e) { /* ignore */ }
+  try { await bot.telegram.sendMessage(id, t(lang, 'deposited_ok')); } catch {}
   res.json({ ok: true });
 });
 
-// Health
-app.get('/', (req, res) => res.send('OK'));
+// ====== Launch mode: webhook if WEBHOOK_URL set, else polling ======
+bot.catch((err) => console.error('Bot error:', err));
+process.on('unhandledRejection', console.error);
+process.on('uncaughtException', console.error);
 
-// Start both
-bot.launch().then(() => console.log('Bot started'));
-app.listen(PORT, () => console.log(`HTTP on :${PORT}`));
+if (WEBHOOK_URL) {
+  const path = new URL(WEBHOOK_URL).pathname || '/tg';
+  // Set webhook in Telegram
+  bot.telegram.setWebhook(WEBHOOK_URL)
+    .then(() => console.log('Webhook set to', WEBHOOK_URL))
+    .catch((e) => console.error('SetWebhook error:', e));
+
+  // Bind telegraf webhook handler to Express
+  app.use(path, (req, res) => bot.webhookCallback(path)(req, res));
+
+  app.listen(PORT, () => console.log(`HTTP on :${PORT} (webhook mode)`));
+} else {
+  // Fallback polling (easier locally)
+  bot.launch().then(() => console.log('Bot started (polling mode)'));
+  app.listen(PORT, () => console.log(`HTTP on :${PORT}`));
+}
 
 // Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
